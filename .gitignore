@@ -1,0 +1,24 @@
+# Python Virtual Environment
+venv/
+.venv/
+env/
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# Environment variables dan secrets
+.env
+.streamlit/
+secrets.toml
+
+# Trained models
+trained_models/
+
+# IDE dan editor
+.vscode/
+.idea/
+
+# Lainnya
+*.log
+lithe-resource-*.json
