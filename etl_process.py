@@ -8,10 +8,8 @@ from dateutil.relativedelta import relativedelta
 
 @st.cache_data(ttl=600)
 def load_dm_order():
-    # Membaca seluruh tabel dm_order dari DATAMART. Ini satu-satunya fungsi yang akan dipanggil oleh app.py untuk data utama.
     print("--- [ETL] Membaca dari DATAMART: public.dm_dashboard_master ---")
     try:
-        # Menggunakan koneksi ke database DATAMART
         with get_connection() as conn:
             df_order= pd.read_sql("SELECT * FROM public.dm_order;", conn)
             
@@ -37,10 +35,8 @@ def load_dm_order():
 
 @st.cache_data(ttl=600)
 def load_dm_outlet():
-    # Membaca seluruh tabel dm_outlet dari DATAMART. Ini satu-satunya fungsi yang akan dipanggil oleh app.py untuk data utama.
     print("--- [ETL] Membaca dari DATAMART: public.dm_outlet ---")
     try:
-        # Menggunakan koneksi ke database DATAMART
         with get_connection() as conn:
             df_outlet = pd.read_sql("SELECT * FROM public.dm_outlet;", conn)
             
@@ -58,16 +54,12 @@ def load_dm_outlet():
 
 @st.cache_data
 def get_outlet_performance_metrics_v2(start_date, end_date):
-    """
-    Menghitung metrik aktivasi dan retensi outlet berdasarkan sync log.
-    """
     print("\n--- [ETL-KHUSUS] Menghitung metrik outlet dari dwh-2 ---")
     metrics = {'activation_rate': None, 'retention_rate': None, 'avg_activation_time_days': None}
     
     if not start_date or not end_date:
         return metrics
 
-    # Menghitung periode sebelumnya
     delta = (end_date - start_date).days
     prev_end_date = start_date - timedelta(days=1)
     prev_start_date = prev_end_date - timedelta(days=delta)
@@ -175,43 +167,26 @@ def get_outlet_performance_metrics_v2(start_date, end_date):
 
 @st.cache_data
 def get_outlet_metrics_trend(start_date, end_date, granularity='daily'):
-    """
-    Mengambil data mentah dan menghitung metrik tren per periode (daily/monthly).
-    """
     print(f"\n--- [ETL] Menghitung tren metrik outlet per {granularity} ---")
-
+    
     if not start_date or not end_date:
         return pd.DataFrame()
 
     try:
         with get_dwh_connection() as conn:
-            # Mengambil data owners & first sync (aktivasi)
-            query_owners = """
-            WITH outlet_first_sync AS (
-                SELECT
-                    outlet_id,
-                    MIN(created_at) AS first_sync_date
-                FROM public.raw_sfwc_menu_sync_logs
-                GROUP BY outlet_id
-            )
+            query_churn = """
             SELECT
-                oo.outlet_id,
-                oo.created_at AS owner_created_at,
-                fs.first_sync_date,
-                u.deleted_at
-            FROM public.raw_sfwc_outlet_owners oo
-            LEFT JOIN outlet_first_sync fs ON oo.outlet_id = fs.outlet_id  -- PERBAIKAN DI SINI
-            LEFT JOIN public.raw_sfwc_users u ON oo.owner_id = u.id;
+                id AS user_id,
+                deleted_at
+            FROM public.raw_sfwc_users
+            WHERE deleted_at::date BETWEEN %(start_date)s AND %(end_date)s;
             """
-            df_outlets = pd.read_sql(query_owners, conn)
-
-            # Mengambil data orders
+            df_churn = pd.read_sql(query_churn, conn, params={'start_date': start_date, 'end_date': end_date})
+            
             query_orders = """
             SELECT
                 date_created_gmt,
-                outlet_id,
-                subtotal AS gmv,
-                id AS order_id
+                outlet_id
             FROM public.raw_sfwc_orders
             WHERE status IN ('wc-completed','wc-disbursement-completed', 'wc-disbursement-proress')
             AND date_created_gmt::date BETWEEN %(start_date)s AND %(end_date)s;
@@ -222,13 +197,9 @@ def get_outlet_metrics_trend(start_date, end_date, granularity='daily'):
         st.error(f"Error: Gagal mengambil data mentah. Pesan: {e}")
         return pd.DataFrame()
 
-    # 1. Konversi semua kolom tanggal ke datetime64[ns]
-    for df in [df_outlets, df_orders]:
-        for col in df.columns:
-            if 'date' in col or 'created_at' in col or 'deleted_at' in col:
-                df[col] = pd.to_datetime(df[col], errors='coerce')
+    df_churn['deleted_at'] = pd.to_datetime(df_churn['deleted_at'])
+    df_orders['date_created_gmt'] = pd.to_datetime(df_orders['date_created_gmt'])
     
-    # 2. Menentukan rentang periode berdasarkan granularity
     if granularity == 'daily':
         period_range = pd.date_range(start=start_date, end=end_date, freq='D')
     else: 
@@ -236,7 +207,7 @@ def get_outlet_metrics_trend(start_date, end_date, granularity='daily'):
     
     trend_data = []
 
-    # 3. Lakukan perulangan untuk setiap periode
+    # Lakukan perulangan untuk setiap periode
     for p_timestamp in period_range:
         if granularity == 'daily':
             current_start = p_timestamp.normalize()
@@ -247,47 +218,25 @@ def get_outlet_metrics_trend(start_date, end_date, granularity='daily'):
             current_end = current_start + pd.offsets.MonthEnd(1)
             period_str = p_timestamp.strftime('%Y-%m')
 
-        # 4. Filter data untuk periode saat ini
+        # Filter data untuk periode saat ini
         df_orders_period = df_orders[
             (df_orders['date_created_gmt'] >= current_start) & 
             (df_orders['date_created_gmt'] <= current_end)
         ].copy()
-
-        df_outlets_period = df_outlets[
-            (df_outlets['first_sync_date'] >= current_start) & 
-            (df_outlets['first_sync_date'] <= current_end)
-        ].copy()
         
-        df_churn_period = df_outlets[
-            (df_outlets['deleted_at'] >= current_start) & 
-            (df_outlets['deleted_at'] <= current_end)
+        df_churn_period = df_churn[
+            (df_churn['deleted_at'] >= current_start) & 
+            (df_churn['deleted_at'] <= current_end)
         ].copy()
 
-        # 5. Lakukan perhitungan metrik untuk periode yang difilter
-        # Metrik Churn Sebelum Aktif
-        valid_churn_data = df_churn_period.dropna(subset=['deleted_at', 'first_sync_date'])
-        churn_count = valid_churn_data[
-            valid_churn_data['deleted_at'] < valid_churn_data['first_sync_date']
-        ]['outlet_id'].nunique()
-        
-        valid_activation_data = df_outlets_period.dropna(subset=['first_sync_date', 'owner_created_at'])
-        valid_activation_data['activation_days'] = (valid_activation_data['first_sync_date'] - valid_activation_data['owner_created_at']).dt.total_seconds() / 86400
-        avg_act_time = valid_activation_data['activation_days'].mean()
-        
+        # Hitung Churn dan Retained
+        churn_count = df_churn_period['user_id'].nunique()
         retained_outlets = df_orders_period['outlet_id'].nunique()
-        total_orders = df_orders_period['order_id'].count()
-        total_gmv = df_orders_period['gmv'].sum()
         
-        avg_order_per_productive = total_orders / retained_outlets if retained_outlets > 0 else 0
-        avg_gmv_per_productive = total_gmv / retained_outlets if retained_outlets > 0 else 0
-
         trend_data.append({
             'date': p_timestamp, 
-            'avg_activation_days': avg_act_time,
-            'avg_order_per_productive_outlet': avg_order_per_productive,
-            'avg_gmv_per_productive_outlet': avg_gmv_per_productive,
-            'retained_outlets': retained_outlets,
-            'churn_before_activation': churn_count
+            'retained': retained_outlets,
+            'churn': churn_count
         })
 
     df_trend = pd.DataFrame(trend_data)
@@ -297,9 +246,6 @@ def get_outlet_metrics_trend(start_date, end_date, granularity='daily'):
 
 @st.cache_data
 def get_open_closed_ratio_working(start_date, end_date):
-    """
-    Versi yang bekerja berdasarkan hasil debug regex
-    """
     query = """
         WITH raw_hours AS (
             SELECT 
@@ -393,13 +339,11 @@ def get_open_closed_ratio_working(start_date, end_date):
                 st.warning("Tidak ada data jam operasional outlet yang valid ditemukan.")
                 return pd.DataFrame()
             
-            # Handle any remaining NaN values
             df['open_closed_ratio'] = df['open_closed_ratio'].fillna(0)
             
             return df
             
     except Exception as e:
         st.error(f"Gagal menghitung Open vs Closed Outlet Ratio: {e}")
-        # Mengembalikan DataFrame kosong dengan kolom yang benar untuk menghindari error
         return pd.DataFrame(columns=['outlet_id', 'uptime_minutes', 'paused_minutes', 'open_closed_ratio'])
 

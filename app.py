@@ -155,30 +155,58 @@ def get_outlet_trend_metrics(df_outlet, df_order, start_date, end_date, granular
             current_start = p_timestamp.date().replace(day=1)
             current_end = (p_timestamp.date().replace(day=28) + pd.Timedelta(days=4)).replace(day=1) - pd.Timedelta(days=1)
             period_str = p_timestamp.strftime('%Y-%m')
-
-        # Outlet yang sudah go_live sampai akhir periode ini
-        active_outlets_cumulative_at_period_end = df_outlet[
+        
+        # 1. Hitung total outlet yang go_live sampai akhir periode ini (TOTAL AKTIF)
+        all_active_outlets = df_outlet[
             (df_outlet['go_live'].dt.date <= current_end)
         ]['outlet_id'].unique()
-
+        
         orders_in_period = df_order[
             (df_order['order_date'].dt.date >= current_start) & 
             (df_order['order_date'].dt.date <= current_end)
         ]
         
+        avg_activation_days = df_outlet[
+            (df_outlet['go_live'].dt.date <= current_end)
+        ]['otlet_activation_time_days'].mean()
+        if pd.isna(avg_activation_days): 
+            avg_activation_days = 0
+
+        # 2. Hitung outlet yang memiliki pesanan di periode ini (PRODUKTIF)
         productive_outlets_in_period = orders_in_period['outlet_id'].unique()
         
         num_productive = len(productive_outlets_in_period)
-        num_total_active = len(active_outlets_cumulative_at_period_end)
-        only_total_active = num_total_active - num_productive
         
+        # 3. Hitung outlet yang go_live TAPI tidak produktif
+        unproductive_but_active = len(set(all_active_outlets) - set(productive_outlets_in_period))
+        
+        # 4. Total aktif adalah jumlah produktif dan tidak produktif
+        num_total_active = num_productive + unproductive_but_active
+        
+        total_orders = orders_in_period['order_id'].count()
+        total_gmv = orders_in_period['gmv_order'].sum()
+        avg_order_per_productive = total_orders / num_productive if num_productive > 0 else 0
+        avg_gmv_per_productive = total_gmv / num_productive if num_productive > 0 else 0
+
+        # untuk menunjukkan total kumulatif.
         trend_data.append({
             'period_str': period_str,
             'Productive': num_productive,
-            'Active': only_total_active
+            'Active': num_total_active,
+            'avg_order_per_productive_outlet': avg_order_per_productive,
+            'avg_gmv_per_productive_outlet': avg_gmv_per_productive,
+            'avg_activation_days': avg_activation_days
         })
 
     df_outlet_trend_metrics = pd.DataFrame(trend_data)
+    
+    # Pastikan semua tanggal/periode yang ada di period_range muncul di df
+    df_outlet_trend_metrics = df_outlet_trend_metrics.set_index('period_str').reindex(
+        [p.strftime('%Y-%m-%d') if granularity=='daily' else p.strftime('%Y-%m') for p in period_range]
+    ).reset_index().rename(columns={'index': 'period_str'})
+
+    # Isi NaN dengan 0 supaya tetap muncul di chart
+    df_outlet_trend_metrics = df_outlet_trend_metrics.fillna(0)
     
     return df_outlet_trend_metrics
 
@@ -318,7 +346,6 @@ if page == "Merchant Analysis":
         total_orders_prev = df_order_count_base_prev['order_id'].nunique()
         success_order_count_prev = df_financial_base_prev['order_id'].nunique()
         
-    
     # calculation growth
     gmv_growth = ((total_gmv - total_gmv_prev) / total_gmv_prev * 100) if total_gmv_prev > 0 else 0
     gross_revenue_growth = ((total_gross_revenue - total_gross_revenue_prev) / total_gross_revenue_prev * 100) if total_gross_revenue_prev > 0 else 0
@@ -462,14 +489,24 @@ Total Success Orders: {success_order_count:,}"""
             outlet_performance_data = get_outlet_performance_metrics_v2(start_date_filter, end_date_filter)
             outlet_performance_data_prev = get_outlet_performance_metrics_v2(start_date_prev, end_date_prev)
             
+            df_outlet_current = df_outlet[
+                (df_outlet['go_live'].dt.date >= start_date_filter) &
+                (df_outlet['go_live'].dt.date <= end_date_filter)
+            ]
+            df_outlet_prev = df_outlet[
+                (df_outlet['go_live'].dt.date >= start_date_prev) &
+                (df_outlet['go_live'].dt.date <= end_date_prev)
+            ]
+            
             act_rate = outlet_performance_data.get('activation_rate')
             ret_rate = outlet_performance_data.get('retention_rate')
             avg_act_time = outlet_performance_data.get('avg_activation_time_days')
-
+            avg_act_time = df_outlet_current['otlet_activation_time_days'].mean()
+            
             act_rate_prev = outlet_performance_data_prev.get('activation_rate')
             ret_rate_prev = outlet_performance_data_prev.get('retention_rate')
-            avg_act_time_prev = outlet_performance_data_prev.get('avg_activation_time_days')
-
+            avg_act_time_prev = df_outlet_prev['otlet_activation_time_days'].mean()
+            
             # ini pakai cumulative active outlet
             avg_gmv_per_outlet = total_gmv / active_outlets if active_outlets > 0 else 0
             avg_gmv_per_outlet_productive = total_gmv / productive_outlets if productive_outlets > 0 else 0
@@ -627,7 +664,7 @@ Total Success Orders: {success_order_count:,}"""
                                 title="Productive & Active Outlets Status",
                                 labels={'period_str': 'Period', 'Count': 'Number of Outlets'},
                                 text='Count',
-                                color_discrete_map={'productive_outlets': '#9467bd', 'active_outlets': '#FFEBEB'}
+                                color_discrete_map={'Productive': '#fa7878', 'Active': '#fcd4d4'}
                     )
                     fig.update_layout(barmode='stack', legend_title_text='Outlet Status', plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', margin=dict(t=60, l=80, r=180, b=25))
                     st.plotly_chart(fig, use_container_width=True)
@@ -651,14 +688,14 @@ Total Success Orders: {success_order_count:,}"""
                 
                 try:
                     df_retention_data = get_outlet_metrics_trend(start_date_filter, end_date_filter, granularity=outlet_granularity_selection.lower())
-
+                
                     df_retention_data["date"] = pd.to_datetime(df_retention_data["date"]).dt.strftime(
                         "%Y-%m" if outlet_granularity_selection=="Monthly" else "%Y-%m-%d"
                     )
-
+                    
                     df_plot = df_retention_data.melt(
                         id_vars=['date'], 
-                        value_vars=['retained_outlets', 'churn_before_activation'],
+                        value_vars=['churn', 'retained'],
                         var_name='Category',
                         value_name='Count'
                     )
@@ -670,7 +707,7 @@ Total Success Orders: {success_order_count:,}"""
                                 title="Retained vs. Churned Outlets",
                                 labels={'date': 'Period', 'Count': 'Number of Outlets'},
                                 text='Count',
-                                color_discrete_map={'retained_outlets': '#FFEBEB', 'churn_before_activation': '#9467bd'}
+                                color_discrete_map={'churn': '#fa7878','retained': '#fcd4d4'}
                     )
                     fig.update_layout(barmode='stack', legend_title_text='Retention Status', plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', margin=dict(t=60, l=80, r=220, b=25))
                     st.plotly_chart(fig, use_container_width=True)
@@ -709,10 +746,10 @@ Total Success Orders: {success_order_count:,}"""
                                 color='Time_Type',
                                 title="Open vs Closed Time by Outlet",
                                 labels={'outlet_id': 'Outlet ID', 'Minutes': 'Total Minutes', 'Time_Type': 'Status'},
-                                color_discrete_map={'uptime_minutes': '#6495ED', 'paused_minutes': '#FF4B4B'},
+                                color_discrete_map={'uptime_minutes': '#fcd4d4', 'paused_minutes': '#fa7878'},
                                 hover_data={'Minutes': ':.2f'}
                     )
-                    fig.update_layout(barmode='stack', plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', margin=dict(t=60, l=80, r=180, b=25))
+                    fig.update_layout(barmode='stack', plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', margin=dict(t=60, l=80, r=200, b=25))
                     st.plotly_chart(fig, use_container_width=True)
 
                 except Exception as e:
@@ -730,10 +767,38 @@ Total Success Orders: {success_order_count:,}"""
                 outlet_granularity_selection2 = st.selectbox(
                     "View Trend By:", ("Monthly", "Daily"),
                     key="outlet_granularity2")
-        
-        
-        with order_tab:
             
+            if not df_outlet_trend_metrics.empty:
+                if selected_metric_to_plot_outlet2 == "Activation Time":
+                    selected_column = 'avg_activation_days'
+                    chart_title = "Average Outlet Activation Time"
+                    y_axis_label = "Jumlah Hari"
+                elif selected_metric_to_plot_outlet2 == "Average GMV":
+                    selected_column = 'avg_gmv_per_productive_outlet'
+                    chart_title = "Rata-rata GMV per Outlet Produktif"
+                    y_axis_label = "Rupiah"
+                elif selected_metric_to_plot_outlet2 == "Average Order":
+                    selected_column = 'avg_order_per_productive_outlet'
+                    chart_title = "Rata-rata Jumlah Pesanan per Outlet Produktif"
+                    y_axis_label = "Jumlah Pesanan"
+                
+                fig = px.line(
+                    df_outlet_trend_metrics, 
+                    x='period_str', 
+                    y=selected_column, 
+                    title=chart_title,
+                    labels={'periode_str': 'Periode', selected_column: y_axis_label},
+                    markers=True
+                )
+                
+                fig.update_traces(line_color='#FF4B4B')
+                fig.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', margin=dict(t=60, l=80, r=80, b=25))
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Tidak ada data untuk periode yang dipilih.")
+                        
+                
+        with order_tab:
             avg_order_value = total_gross_revenue / success_order_count if total_orders > 0 else 0
             success_ratio = (success_order_count / total_orders * 100) if total_orders > 0 else 0.0
 
