@@ -6,7 +6,7 @@ from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
 
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=3600)
 def load_dm_order():
     print("--- [ETL] Membaca dari DATAMART: public.dm_dashboard_master ---")
     try:
@@ -33,7 +33,7 @@ def load_dm_order():
         st.error(f"Gagal total memuat data dari DATAMART: {e}")
         return pd.DataFrame()
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=3600)
 def load_dm_outlet():
     print("--- [ETL] Membaca dari DATAMART: public.dm_outlet ---")
     try:
@@ -235,8 +235,8 @@ def get_outlet_metrics_trend(start_date, end_date, granularity='daily'):
         
         trend_data.append({
             'date': p_timestamp, 
-            'retained': retained_outlets,
-            'churn': churn_count
+            'Retained': retained_outlets,
+            'Churn': churn_count
         })
 
     df_trend = pd.DataFrame(trend_data)
@@ -333,12 +333,10 @@ def get_open_closed_ratio_working(start_date, end_date):
     
     try:
         with get_dwh_connection() as conn:
-            df = pd.read_sql(query, conn, params=params)
-            
+            df = pd.read_sql(query, conn, params=params)          
             if len(df) == 0:
                 st.warning("Tidak ada data jam operasional outlet yang valid ditemukan.")
-                return pd.DataFrame()
-            
+                return pd.DataFrame()           
             df['open_closed_ratio'] = df['open_closed_ratio'].fillna(0)
             
             return df
@@ -347,3 +345,72 @@ def get_open_closed_ratio_working(start_date, end_date):
         st.error(f"Gagal menghitung Open vs Closed Outlet Ratio: {e}")
         return pd.DataFrame(columns=['outlet_id', 'uptime_minutes', 'paused_minutes', 'open_closed_ratio'])
 
+def get_open_closed_daily_trend(start_date, end_date, granularity):
+    """
+    Menghitung jumlah outlet yang Open vs. Paused per hari atau per bulan.
+    """
+    print(f"\n--- [ETL] Menghitung jumlah outlet Open vs Closed dari {start_date} hingga {end_date} dengan granularitas {granularity} ---")
+
+    try:
+        with get_dwh_connection() as conn:
+            query_pause_events = """
+            SELECT
+                outlet_id,
+                created_at,
+                status
+            FROM public.raw_sfwc_pause_stores
+            WHERE created_at::date BETWEEN %(start_date)s AND %(end_date)s
+            ORDER BY created_at ASC;
+            """
+            df_pause_events = pd.read_sql(
+                query_pause_events,
+                conn,
+                params={'start_date': start_date, 'end_date': end_date}
+            )
+            
+            query_all_outlets = "SELECT DISTINCT outlet_id FROM public.raw_sfwc_pause_stores;"
+            df_all_outlets = pd.read_sql(query_all_outlets, conn)
+
+    except Exception as e:
+        st.error(f"Error: Gagal mengambil data mentah. Pesan: {e}")
+        return pd.DataFrame()
+
+    if df_pause_events.empty or df_all_outlets.empty:
+        return pd.DataFrame()
+
+    df_pause_events['created_at'] = pd.to_datetime(df_pause_events['created_at'])
+    all_outlets = df_all_outlets['outlet_id'].unique()
+
+    # Logika untuk agregasi harian
+    date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+    daily_data = []
+    
+    for d in date_range:
+        current_date = d.normalize()
+        
+        daily_paused_outlets = df_pause_events[
+            (df_pause_events['created_at'].dt.date == current_date.date()) &
+            (df_pause_events['status'] == 'PAUSED')
+        ]['outlet_id'].unique()
+
+        paused_count = len(daily_paused_outlets)
+        open_count = len(all_outlets) - paused_count
+        
+        daily_data.append({
+            'date': current_date,
+            'Open': open_count,
+            'Close': paused_count})
+
+    df_result = pd.DataFrame(daily_data)
+
+    if granularity.lower() == "monthly":
+        df_result['period'] = df_result['date'].dt.to_period('M').astype(str)
+        df_final = df_result.groupby('period').agg(
+            Open=('Open', 'sum'),
+            Close=('Close', 'sum')
+        ).reset_index()
+    else: # Daily
+        df_result['period'] = df_result['date'].dt.strftime('%Y-%m-%d')
+        df_final = df_result[['period', 'Open', 'Close']].copy()
+
+    return df_final
