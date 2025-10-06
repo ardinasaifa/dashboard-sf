@@ -2,7 +2,7 @@
 import pandas as pd
 import streamlit as st
 from db_connection import get_connection, get_dwh_connection
-from datetime import date, timedelta
+from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
 
@@ -53,7 +53,7 @@ def load_dm_outlet():
         return pd.DataFrame()
 
 @st.cache_data
-def get_outlet_performance_metrics_v2(start_date, end_date):
+def get_outlet_performance_metrics(start_date, end_date):
     print("\n--- [ETL-KHUSUS] Menghitung metrik outlet dari dwh-2 ---")
     metrics = {'activation_rate': None, 'retention_rate': None, 'avg_activation_time_days': None}
     
@@ -76,15 +76,28 @@ def get_outlet_performance_metrics_v2(start_date, end_date):
     ),
     
     -- 2. Tentukan outlet yang aktif (pernah sync) di periode saat ini dan sebelumnya
-    current_active AS (
-        SELECT DISTINCT outlet_id 
-        FROM public.raw_sfwc_menu_sync_logs
-        WHERE created_at >= %(start_date)s AND created_at <= %(end_date)s
-    ),
     previous_active AS (
-        SELECT DISTINCT outlet_id 
-        FROM outlet_first_sync 
-        WHERE first_sync_date >= %(prev_start_date)s AND first_sync_date <= %(prev_end_date)s
+        SELECT DISTINCT u.id AS outlet_id
+        FROM outlet_first_sync f
+        JOIN raw_sfwc_users u ON f.outlet_id = u.id
+        WHERE f.first_sync_date <= %(prev_end_date)s
+            AND (u.deleted_at IS NULL OR u.deleted_at > %(prev_end_date)s)
+    ),
+
+    -- Outlet aktif bulan ini
+    current_active AS (
+        SELECT DISTINCT u.id AS outlet_id
+        FROM outlet_first_sync f
+        JOIN raw_sfwc_users u ON f.outlet_id = u.id
+        WHERE f.first_sync_date <= %(end_date)s
+            AND (u.deleted_at IS NULL OR u.deleted_at > %(end_date)s)
+    ),
+
+    -- Outlet retained (aktif di dua bulan berturut-turut)
+    retained_outlets AS (
+        SELECT c.outlet_id
+        FROM current_active c
+        INNER JOIN previous_active p ON c.outlet_id = p.outlet_id
     ),
     
     -- 3. Tentukan outlet yang baru diaktifkan di periode ini (first sync-nya ada di periode ini)
@@ -114,7 +127,7 @@ def get_outlet_performance_metrics_v2(start_date, end_date):
     
     SELECT
     -- Retention Rate: (Outlet aktif di kedua periode) / (Outlet aktif di periode sebelumnya)
-    (SELECT COUNT(*) FROM newly_activated)::FLOAT/ NULLIF((SELECT COUNT(*) FROM previous_active)::FLOAT, 0) AS retention_rate,
+    (SELECT COUNT(*) FROM retained_outlets)::FLOAT/ NULLIF((SELECT COUNT(*) FROM previous_active)::FLOAT, 0) AS retention_rate,
     
     -- Activation Rate: (Jumlah outlet yang baru diaktifkan) / (Jumlah outlet yang diverifikasi - churn sebelum aktif)
     (SELECT COUNT(DISTINCT outlet_id) FROM newly_activated)::FLOAT / NULLIF(((SELECT count FROM total_verified) - (SELECT count FROM churn_before_activation))::FLOAT, 0) AS activation_rate
@@ -166,14 +179,27 @@ def get_outlet_performance_metrics_v2(start_date, end_date):
 
 
 @st.cache_data
-def get_outlet_metrics_trend(start_date, end_date, granularity='daily'):
-    print(f"\n--- [ETL] Menghitung tren metrik outlet per {granularity} ---")
-    
+def get_outlet_metrics_retention_trend(start_date, end_date, granularity='daily'):
+    print(f"\n--- [ETL] Menghitung tren retensi outlet per {granularity} ---")
+
     if not start_date or not end_date:
         return pd.DataFrame()
 
     try:
         with get_dwh_connection() as conn:
+            # Ambil data outlet (go live & deleted)
+            query_outlet = """
+            SELECT 
+                id AS outlet_id,
+                go_live,
+                deleted_at AS outlet_deleted_at
+            FROM public.raw_sfwc_users
+            WHERE go_live IS NOT NULL
+            AND (go_live::date <= %(end_date)s);
+            """
+            df_outlet = pd.read_sql(query_outlet, conn, params={'end_date': end_date})
+
+            # Ambil data churn
             query_churn = """
             SELECT
                 id AS user_id,
@@ -182,32 +208,24 @@ def get_outlet_metrics_trend(start_date, end_date, granularity='daily'):
             WHERE deleted_at::date BETWEEN %(start_date)s AND %(end_date)s;
             """
             df_churn = pd.read_sql(query_churn, conn, params={'start_date': start_date, 'end_date': end_date})
-            
-            query_orders = """
-            SELECT
-                date_created_gmt,
-                outlet_id
-            FROM public.raw_sfwc_orders
-            WHERE status IN ('wc-completed','wc-disbursement-completed', 'wc-disbursement-proress')
-            AND date_created_gmt::date BETWEEN %(start_date)s AND %(end_date)s;
-            """
-            df_orders = pd.read_sql(query_orders, conn, params={'start_date': start_date, 'end_date': end_date})
-            
+
     except Exception as e:
         st.error(f"Error: Gagal mengambil data mentah. Pesan: {e}")
         return pd.DataFrame()
 
+    # Pastikan kolom tanggal dalam format datetime
+    df_outlet['go_live'] = pd.to_datetime(df_outlet['go_live'])
+    df_outlet['outlet_deleted_at'] = pd.to_datetime(df_outlet['outlet_deleted_at'])
     df_churn['deleted_at'] = pd.to_datetime(df_churn['deleted_at'])
-    df_orders['date_created_gmt'] = pd.to_datetime(df_orders['date_created_gmt'])
-    
+
+    # Tentukan rentang analisis
     if granularity == 'daily':
         period_range = pd.date_range(start=start_date, end=end_date, freq='D')
-    else: 
+    else:
         period_range = pd.period_range(start=start_date, end=end_date, freq='M').to_timestamp('s').to_list()
-    
+
     trend_data = []
 
-    # Lakukan perulangan untuk setiap periode
     for p_timestamp in period_range:
         if granularity == 'daily':
             current_start = p_timestamp.normalize()
@@ -218,24 +236,21 @@ def get_outlet_metrics_trend(start_date, end_date, granularity='daily'):
             current_end = current_start + pd.offsets.MonthEnd(1)
             period_str = p_timestamp.strftime('%Y-%m')
 
-        # Filter data untuk periode saat ini
-        df_orders_period = df_orders[
-            (df_orders['date_created_gmt'] >= current_start) & 
-            (df_orders['date_created_gmt'] <= current_end)
-        ].copy()
-        
-        df_churn_period = df_churn[
-            (df_churn['deleted_at'] >= current_start) & 
-            (df_churn['deleted_at'] <= current_end)
-        ].copy()
+        # Outlet aktif = sudah go live dan belum dihapus sebelum periode ini berakhir
+        active_outlets = df_outlet[
+            (df_outlet['go_live'] <= current_end) &
+            ((df_outlet['outlet_deleted_at'].isna()) | (df_outlet['outlet_deleted_at'] > current_end))
+        ]['outlet_id'].nunique()
 
-        # Hitung Churn dan Retained
-        churn_count = df_churn_period['user_id'].nunique()
-        retained_outlets = df_orders_period['outlet_id'].nunique()
-        
+        # Outlet churn = yang dihapus dalam periode ini
+        churn_count = df_churn[
+            (df_churn['deleted_at'] >= current_start) &
+            (df_churn['deleted_at'] <= current_end)
+        ]['user_id'].nunique()
+
         trend_data.append({
-            'date': p_timestamp, 
-            'Retained': retained_outlets,
+            'date': p_timestamp,
+            'Retained': active_outlets,
             'Churn': churn_count
         })
 
@@ -243,6 +258,7 @@ def get_outlet_metrics_trend(start_date, end_date, granularity='daily'):
     df_trend['date'] = pd.to_datetime(df_trend['date'])
 
     return df_trend
+
 
 @st.cache_data
 def get_open_closed_ratio_working(start_date, end_date):
@@ -345,72 +361,370 @@ def get_open_closed_ratio_working(start_date, end_date):
         st.error(f"Gagal menghitung Open vs Closed Outlet Ratio: {e}")
         return pd.DataFrame(columns=['outlet_id', 'uptime_minutes', 'paused_minutes', 'open_closed_ratio'])
 
-def get_open_closed_daily_trend(start_date, end_date, granularity):
+
+@st.cache_data
+def get_open_closed_trend(start_date, end_date, granularity="daily"):
     """
-    Menghitung jumlah outlet yang Open vs. Paused per hari atau per bulan.
+    Menghitung persentase open vs closed outlet per periode.
+
+    Returns:
+        DataFrame dengan kolom: period, Open (%), Close (%)
     """
-    print(f"\n--- [ETL] Menghitung jumlah outlet Open vs Closed dari {start_date} hingga {end_date} dengan granularitas {granularity} ---")
+
+    if granularity == "daily":
+        date_trunc = "day"
+    elif granularity == "monthly":
+        date_trunc = "month"
+    else:
+        raise ValueError("granularity harus 'daily' atau 'monthly'")
+
+    query = f"""
+    WITH raw_hours AS (
+        SELECT 
+            user_id AS outlet_id,
+            meta_value
+        FROM public.raw_sfwc_usermeta
+        WHERE meta_key = 'wcfm_vendor_store_hours'
+          AND meta_value ~ 's:9:"day_times";a:[1-7]:{{.*}}'
+    ),
+    time_slots AS (
+        SELECT 
+            outlet_id,
+            unnest(regexp_matches(meta_value, 's:5:"start";s:[0-9]+:"([0-9]{{2}}:[0-9]{{2}})"', 'g')) AS start_time,
+            unnest(regexp_matches(meta_value, 's:3:"end";s:[0-9]+:"([0-9]{{2}}:[0-9]{{2}})"', 'g')) AS end_time
+        FROM raw_hours
+    ),
+    daily_minutes AS (
+        SELECT 
+            outlet_id,
+            EXTRACT(EPOCH FROM (end_time::time - start_time::time)) / 60 AS minutes_per_day
+        FROM time_slots
+        WHERE start_time::time < end_time::time
+    ),
+    operational_minutes AS (
+        SELECT 
+            outlet_id,
+            AVG(minutes_per_day) * 6 AS ideal_minutes  -- asumsi 6 hari per minggu
+        FROM daily_minutes
+        GROUP BY outlet_id
+    ),
+    pause_windows AS (
+        SELECT 
+            outlet_id,
+            status,
+            created_at,
+            LEAD(created_at) OVER (PARTITION BY outlet_id ORDER BY created_at) AS next_time
+        FROM public.raw_sfwc_pause_stores
+        WHERE created_at BETWEEN %(start_date)s AND %(end_date)s
+          AND status IN ('PAUSED', 'UNPAUSED')
+    ),
+    paused_intervals AS (
+        SELECT 
+            outlet_id,
+            DATE_TRUNC('{date_trunc}', created_at) AS period,
+            LEAST(EXTRACT(EPOCH FROM (COALESCE(next_time, %(end_date)s) - created_at)) / 60.0, 24*60) AS paused_minutes
+        FROM pause_windows
+        WHERE status = 'PAUSED'
+          AND created_at < COALESCE(next_time, %(end_date)s)
+    ),
+    paused_minutes AS (
+        SELECT 
+            outlet_id,
+            period,
+            SUM(paused_minutes) AS total_paused_minutes
+        FROM paused_intervals
+        GROUP BY outlet_id, period
+    )
+    SELECT 
+        period,
+        ROUND(AVG(GREATEST(o.ideal_minutes - COALESCE(p.total_paused_minutes, 0), 0) / o.ideal_minutes * 100), 2) AS Open,
+        ROUND(AVG(LEAST(COALESCE(p.total_paused_minutes, 0), o.ideal_minutes) / o.ideal_minutes * 100), 2) AS Close
+    FROM operational_minutes o
+    LEFT JOIN paused_minutes p ON o.outlet_id = p.outlet_id AND p.period IS NOT NULL
+    GROUP BY period
+    ORDER BY period;
+    """
+
+    params = {"start_date": start_date, "end_date": end_date}
 
     try:
         with get_dwh_connection() as conn:
-            query_pause_events = """
-            SELECT
-                outlet_id,
-                created_at,
-                status
-            FROM public.raw_sfwc_pause_stores
-            WHERE created_at::date BETWEEN %(start_date)s AND %(end_date)s
-            ORDER BY created_at ASC;
-            """
-            df_pause_events = pd.read_sql(
-                query_pause_events,
-                conn,
-                params={'start_date': start_date, 'end_date': end_date}
-            )
-            
-            query_all_outlets = "SELECT DISTINCT outlet_id FROM public.raw_sfwc_pause_stores;"
-            df_all_outlets = pd.read_sql(query_all_outlets, conn)
+            df = pd.read_sql(query, conn, params=params)
+
+            if df.empty:
+                st.warning("Tidak ada data open/closed outlet yang valid ditemukan.")
+                return pd.DataFrame(columns=['period', 'Open', 'Close'])
+
+            return df
 
     except Exception as e:
-        st.error(f"Error: Gagal mengambil data mentah. Pesan: {e}")
-        return pd.DataFrame()
+        st.error(f"Gagal menghitung Open vs Close Outlet Trend: {e}")
+        return pd.DataFrame(columns=['period', 'Open', 'Close'])
 
-    if df_pause_events.empty or df_all_outlets.empty:
-        return pd.DataFrame()
 
-    df_pause_events['created_at'] = pd.to_datetime(df_pause_events['created_at'])
-    all_outlets = df_all_outlets['outlet_id'].unique()
-
-    # Logika untuk agregasi harian
-    date_range = pd.date_range(start=start_date, end=end_date, freq='D')
-    daily_data = []
+def get_menu_availability_ratio(start_date, end_date, granularity="daily"):
+    """
+    Menghitung rasio ketersediaan menu dengan granularity harian atau bulanan.
     
-    for d in date_range:
-        current_date = d.normalize()
+    Args:
+        start_date (str/datetime): tanggal mulai
+        end_date (str/datetime): tanggal akhir
+        granularity (str): "daily" atau "monthly"
+    """
+    
+    if granularity == "daily":
+        date_trunc = "day"
+    elif granularity == "monthly":
+        date_trunc = "month"
+    else:
+        raise ValueError("granularity harus 'daily' atau 'monthly'")
+    
+    query = f"""
+    WITH raw_hours AS (
+        SELECT 
+            user_id AS outlet_id,
+            meta_value
+        FROM public.raw_sfwc_usermeta
+        WHERE meta_key = 'wcfm_vendor_store_hours'
+          AND meta_value ~ 's:9:"day_times";a:[1-7]:{{.*}}'
+    ),
+    time_slots AS (
+        SELECT 
+            outlet_id,
+            unnest(regexp_matches(meta_value, 's:5:"start";s:[0-9]+:"([0-9]{{2}}:[0-9]{{2}})"', 'g')) AS start_time,
+            unnest(regexp_matches(meta_value, 's:3:"end";s:[0-9]+:"([0-9]{{2}}:[0-9]{{2}})"', 'g')) AS end_time
+        FROM raw_hours
+    ),
+    daily_minutes AS (
+        SELECT 
+            outlet_id,
+            EXTRACT(EPOCH FROM (end_time::time - start_time::time)) / 60.0 AS minutes_per_slot
+        FROM time_slots
+    ),
+    product_counts AS (
+        SELECT outlet_id, COUNT(ID) AS total_menus
+        FROM public.raw_sfwc_posts
+        WHERE post_type = 'product'
+        GROUP BY outlet_id
+    ),
+    ideal_minutes AS (
+        SELECT 
+            pc.outlet_id,
+            pc.total_menus,
+            SUM(dm.minutes_per_slot) AS weekly_ideal_minutes,
+            (SUM(dm.minutes_per_slot) * 4 * pc.total_menus) AS total_ideal_minutes_menu
+        FROM daily_minutes dm
+        JOIN product_counts pc ON dm.outlet_id = pc.outlet_id
+        GROUP BY pc.outlet_id, pc.total_menus
+    ),
+    unavailable_minutes AS (
+        SELECT
+            product_id,
+            DATE_TRUNC('{date_trunc}', t1.created_at) AS period,
+            SUM(EXTRACT(EPOCH FROM (
+                (SELECT created_at 
+                 FROM public.raw_sfwc_menu_pause_logs 
+                 WHERE product_id = t1.product_id 
+                   AND created_at > t1.created_at 
+                   AND status = 'AVAILABLE' 
+                 ORDER BY created_at ASC LIMIT 1) 
+                - t1.created_at
+            )))/60.0 AS total_unavailable_minutes
+        FROM public.raw_sfwc_menu_pause_logs t1 
+        WHERE 
+            status = 'UNAVAILABLE'
+            AND created_at BETWEEN %(start_date)s AND %(end_date)s
+        GROUP BY product_id, DATE_TRUNC('{date_trunc}', t1.created_at)
+    )
+    SELECT 
+        im.outlet_id,
+        DATE_TRUNC('{date_trunc}', COALESCE(um.period, %(start_date)s)) AS period,
+        im.total_menus,
+        im.total_ideal_minutes_menu,
+        COALESCE(SUM(um.total_unavailable_minutes), 0) AS total_unavailable_minutes,
+        (im.total_ideal_minutes_menu - COALESCE(SUM(um.total_unavailable_minutes), 0)) AS total_available_minutes,
+        CASE 
+            WHEN im.total_ideal_minutes_menu > 0 THEN
+                ROUND(
+                    ((im.total_ideal_minutes_menu - COALESCE(SUM(um.total_unavailable_minutes), 0)) / im.total_ideal_minutes_menu) * 100,
+                    2
+                )
+            ELSE 0 
+        END AS availability_ratio_percent
+    FROM ideal_minutes im
+    LEFT JOIN public.raw_sfwc_posts p ON im.outlet_id = p.outlet_id
+    LEFT JOIN unavailable_minutes um ON p.ID = um.product_id
+    GROUP BY im.outlet_id, im.total_menus, im.total_ideal_minutes_menu, DATE_TRUNC('{date_trunc}', COALESCE(um.period, %(start_date)s))
+    ORDER BY im.outlet_id, period;
+    """
+    
+    params = {"start_date": start_date, "end_date": end_date}
+    
+    try:
+        with get_dwh_connection() as conn: 
+            df = pd.read_sql(query, conn, params=params)
         
-        daily_paused_outlets = df_pause_events[
-            (df_pause_events['created_at'].dt.date == current_date.date()) &
-            (df_pause_events['status'] == 'PAUSED')
-        ]['outlet_id'].unique()
+        if df.empty:
+            print("Tidak ada data rasio ketersediaan yang valid ditemukan.")
+            return pd.DataFrame(columns=[
+                'outlet_id', 'period', 'total_menus', 'total_ideal_minutes_menu', 
+                'total_unavailable_minutes', 'total_available_minutes', 
+                'availability_ratio_percent'
+            ]) 
+        return df
+            
+    except Exception as e:
+        print(f"Gagal menghitung Rasio Ketersediaan Menu: {e}")
 
-        paused_count = len(daily_paused_outlets)
-        open_count = len(all_outlets) - paused_count
+
+def get_menu_availability_trend(start_date, end_date, granularity="daily"):
+    """
+    Menghitung persentase ketersediaan menu dengan granularity harian atau bulanan.
+    Output: persen available vs unavailable siap untuk chart stacked bar.
+    
+    Memperbaiki masalah pada tanggal awal dengan memastikan setiap periode dalam 
+    rentang memiliki baris, meskipun tidak ada log 'UNAVAILABLE'.
+    """
+
+    # --- Konversi tanggal string ke datetime ---
+    if isinstance(start_date, str):
+        start_date_obj = datetime.strptime(start_date, "%Y-%m-%d")
+    else:
+        start_date_obj = start_date
+
+    if isinstance(end_date, str):
+        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
+    else:
+        end_date_obj = end_date
         
-        daily_data.append({
-            'date': current_date,
-            'Open': open_count,
-            'Close': paused_count})
+    if granularity == "daily":
+        date_trunc = "day"
+        interval = '1 day'
+    elif granularity == "monthly":
+        date_trunc = "month"
+        interval = '1 month'
+    else:
+        raise ValueError("granularity harus 'daily' atau 'monthly'")
 
-    df_result = pd.DataFrame(daily_data)
+    # Perhatikan: Query SQL telah dimodifikasi (lihat di bawah)
+    query = f"""
+    WITH raw_hours AS (
+        SELECT 
+            user_id AS outlet_id,
+            meta_value
+        FROM public.raw_sfwc_usermeta
+        WHERE meta_key = 'wcfm_vendor_store_hours'
+          AND meta_value ~ 's:9:"day_times";a:[1-7]:{{.*}}'
+    ),
+    time_slots AS (
+        SELECT 
+            outlet_id,
+            unnest(regexp_matches(meta_value, 's:5:"start";s:[0-9]+:"([0-9]{{2}}:[0-9]{{2}})"', 'g'))::time AS start_time,
+            unnest(regexp_matches(meta_value, 's:3:"end";s:[0-9]+:"([0-9]{{2}}:[0-9]{{2}})"', 'g'))::time AS end_time
+        FROM raw_hours
+    ),
+    daily_minutes AS (
+        SELECT 
+            outlet_id,
+            EXTRACT(EPOCH FROM (end_time - start_time)) / 60.0 AS minutes_per_slot
+        FROM time_slots
+    ),
+    product_counts AS (
+        SELECT outlet_id, COUNT(ID) AS total_menus
+        FROM public.raw_sfwc_posts
+        WHERE post_type = 'product'
+        GROUP BY outlet_id
+    ),
+    ideal_minutes AS (
+        -- Menghitung Total Ideal Minutes per hari per menu per outlet
+        SELECT 
+            pc.outlet_id,
+            p.ID AS product_id,
+            (SUM(dm.minutes_per_slot)) AS daily_open_minutes, -- Ideal per hari per menu
+            (SUM(dm.minutes_per_slot)) AS total_ideal_minutes_menu
+        FROM daily_minutes dm
+        JOIN product_counts pc ON dm.outlet_id = pc.outlet_id
+        JOIN public.raw_sfwc_posts p ON pc.outlet_id = p.outlet_id -- Join ke level product
+        WHERE p.post_type = 'product'
+        GROUP BY pc.outlet_id, p.ID
+    ),
+    unavailable_minutes AS (
+        -- Menghitung Total Unavailable Minutes per periode per menu
+        SELECT
+            product_id,
+            DATE_TRUNC('{date_trunc}', t1.created_at) AS period,
+            SUM(
+                EXTRACT(EPOCH FROM (
+                    COALESCE(
+                        (SELECT MIN(t2.created_at)
+                           FROM public.raw_sfwc_menu_pause_logs t2
+                           WHERE t2.product_id = t1.product_id
+                             AND t2.created_at > t1.created_at
+                             AND t2.status = 'AVAILABLE'
+                             AND DATE_TRUNC('{date_trunc}', t2.created_at) = DATE_TRUNC('{date_trunc}', t1.created_at)),
+                        -- Jika log AVAILABLE tidak ada dalam periode, gunakan akhir periode (atau end_date)
+                        (DATE_TRUNC('{date_trunc}', t1.created_at) + interval '{interval}')::timestamp - interval '1 second'
+                    ) - t1.created_at
+                )) / 60.0
+            ) AS total_unavailable_minutes
+        FROM public.raw_sfwc_menu_pause_logs t1
+        WHERE t1.status = 'UNAVAILABLE'
+          AND t1.created_at BETWEEN %(start_date)s AND %(end_date)s
+        GROUP BY product_id, DATE_TRUNC('{date_trunc}', t1.created_at)
+    ),
+    -- **SOLUSI UTAMA:** Buat seri tanggal/bulan sebagai basis
+    date_series AS (
+        SELECT 
+            DATE_TRUNC('{date_trunc}', generate_series(%(start_date)s::timestamp, %(end_date)s::timestamp, interval '{interval}')) AS period_date
+    )
+    
+    SELECT 
+        ds.period_date AS period,
+        ROUND(
+            CASE WHEN SUM(im.total_ideal_minutes_menu) > 0
+                 THEN (SUM(im.total_ideal_minutes_menu) - COALESCE(SUM(um.total_unavailable_minutes),0))
+                      / SUM(im.total_ideal_minutes_menu) * 100
+                 ELSE 0 END, 2
+        ) AS available,
+        ROUND(
+            CASE WHEN SUM(im.total_ideal_minutes_menu) > 0
+                 THEN COALESCE(SUM(um.total_unavailable_minutes),0)
+                      / SUM(im.total_ideal_minutes_menu) * 100
+                 ELSE 0 END, 2
+        ) AS unavailable
+    FROM date_series ds
+    -- Join semua menu ideal ke setiap periode
+    LEFT JOIN ideal_minutes im ON 1=1 
+    -- Join data unavailable yang sudah dihitung per periode dan per menu
+    LEFT JOIN unavailable_minutes um ON um.period = ds.period_date AND um.product_id = im.product_id
+    GROUP BY ds.period_date
+    ORDER BY period;
+    """
 
-    if granularity.lower() == "monthly":
-        df_result['period'] = df_result['date'].dt.to_period('M').astype(str)
-        df_final = df_result.groupby('period').agg(
-            Open=('Open', 'sum'),
-            Close=('Close', 'sum')
-        ).reset_index()
-    else: # Daily
-        df_result['period'] = df_result['date'].dt.strftime('%Y-%m-%d')
-        df_final = df_result[['period', 'Open', 'Close']].copy()
+    params = {"start_date": start_date_obj, "end_date": end_date_obj}
 
-    return df_final
+    try:
+        # Gunakan fungsi koneksi database Anda di sini
+        with get_dwh_connection() as conn: 
+            # Pastikan Anda mengimplementasikan get_dwh_connection()
+            df = pd.read_sql(query, conn, params=params)
+            
+            if df.empty:
+                print("⚠️ Tidak ada data rasio ketersediaan menu ditemukan.")
+                return pd.DataFrame(columns=['period','available','unavailable'])
+
+            df['period'] = pd.to_datetime(df['period'])
+
+            # 🔧 Normalisasi untuk granularity monthly → tampilkan sebagai "YYYY-MM"
+            if granularity == "monthly":
+                # Mengubah timestamp menjadi format YYYY-MM
+                df['period'] = df['period'].dt.to_period('M').dt.to_timestamp()
+
+            return df
+
+    except NotImplementedError:
+        print("❌ Error: Fungsi 'get_dwh_connection' belum diimplementasikan.")
+        return pd.DataFrame(columns=['period','available','unavailable'])
+    except Exception as e:
+        print(f"❌ Error hitung menu availability trend: {e}")
+        return pd.DataFrame(columns=['period','available','unavailable'])
