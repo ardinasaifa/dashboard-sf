@@ -571,8 +571,6 @@ def get_menu_availability_trend(start_date, end_date, granularity="daily"):
     Menghitung tren ketersediaan menu (available vs unavailable)
     dengan pendekatan yang konsisten seperti `get_open_closed_trend`.
     
-    Perhitungan dilakukan per periode (daily / weekly / monthly)
-    dengan memanggil `get_menu_availability_ratio()` untuk setiap rentang waktu.
     """
 
     granularity = granularity.lower()
@@ -605,7 +603,6 @@ def get_menu_availability_trend(start_date, end_date, granularity="daily"):
             'period': period_label
         })
 
-        # Naikkan tanggal ke periode berikutnya
         if granularity == "monthly":
             if current_end == end_date:
                 break

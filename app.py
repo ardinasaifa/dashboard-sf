@@ -135,18 +135,13 @@ st.markdown("""
 
 @st.cache_data
 def load_geojson_dynamic(base_dir, level, selected_province_folder=None, selected_city_folder=None, selected_district_file=None):
-    """
-    Load GeoJSON berdasarkan level (Province, City, atau District)
-    dan ambil nama wilayah sesuai field yang relevan.
-    """
+
     geojson_path = None
 
-    # Tentukan file berdasarkan level
     if level == "Province":
         geojson_path = os.path.join(base_dir, "prov 37.geojson")
 
     elif level == "City":
-        # Selalu pakai kab 37.geojson
         geojson_path = os.path.join(base_dir, "kab 37.geojson")
 
     elif level == "District" and selected_province_folder and selected_city_folder:
@@ -155,7 +150,6 @@ def load_geojson_dynamic(base_dir, level, selected_province_folder=None, selecte
         if selected_district_file:
             geojson_path = os.path.join(city_path, selected_district_file)
         else:
-            # fallback ke logika lama: cari district.geojson atau file pertama
             direct_district_file = os.path.join(city_path, "district.geojson")
             if os.path.exists(direct_district_file):
                 geojson_path = direct_district_file
@@ -163,12 +157,10 @@ def load_geojson_dynamic(base_dir, level, selected_province_folder=None, selecte
                 district_files = [
                     os.path.join(city_path, f)
                     for f in os.listdir(city_path)
-                    if f.endswith(".geojson")
-                ]
+                    if f.endswith(".geojson")]
                 if district_files:
                     geojson_path = district_files[0]
 
-    # Load GeoJSON
     if geojson_path and os.path.exists(geojson_path):
         try:
             with open(geojson_path, encoding="utf-8") as f:
@@ -180,7 +172,6 @@ def load_geojson_dynamic(base_dir, level, selected_province_folder=None, selecte
         region_names = []
         key_name = None
 
-        # Tentukan kemungkinan field berdasarkan level
         possible_keys = {
             "Province": ["prov_name", "province", "name"],
             "City": ["regency", "city", "kabupaten", "name"],
@@ -189,7 +180,6 @@ def load_geojson_dynamic(base_dir, level, selected_province_folder=None, selecte
         features = geojson_data.get("features", [])
         if features:
             props = features[0].get("properties", {})
-            # Pilih field yang ada di GeoJSON
             for k in possible_keys.get(level, ["name"]):
                 if k in props:
                     key_name = k
@@ -261,7 +251,7 @@ def get_outlet_trend_metrics(df_outlet, df_order, start_date, end_date, granular
             (df_outlet['outlet_deleted_at'].isna() | (df_outlet['outlet_deleted_at'].dt.date > current_end))
         ]['outlet_id'].unique()
 
-        # outlet yang ada order = produktif
+        # outlet yang ada order = produktif (ini blm kepake)
         productive_outlets = df_order[
             (df_order['order_date'].dt.date >= current_start) &
             (df_order['order_date'].dt.date <= current_end)
@@ -418,14 +408,17 @@ if page == "Merchant Analysis":
 
         df_financial_base = df_orders_filtered[df_orders_filtered['status'].isin(FINANCIAL_STATUSES)] if not selected_statuses else df_orders_filtered
         df_order_count_base = df_orders_filtered[df_orders_filtered['status'].isin(TOTAL_ORDER_COUNT_STATUSES)] if not selected_statuses else df_orders_filtered
-        df_unique_withdrawals = df_financial_base[df_financial_base['withdrawal_id'].notna()].drop_duplicates(subset=['withdrawal_id'])
-        
+        df_outlet_filtered = df_outlet.copy()
+        if 'All' not in selected_outlets:
+            df_outlet_filtered = df_outlet_filtered[df_outlet_filtered['outlet_name'].isin(selected_outlets)]
+        if 'All' not in selected_owners:
+            df_outlet_filtered = df_outlet_filtered[df_outlet_filtered['owner_name'].isin(selected_owners)]
+
+        df_outlet_filtered['avg_rating'] = df_outlet_filtered['avg_rating'].fillna(df_outlet_filtered['avg_rating_global'])
+
+
         total_gmv = df_financial_base['gmv_order'].sum()
         total_cogs = df_financial_base['cogs_order'].sum()
-        
-        total_ofd_fees = df_unique_withdrawals['ofd_fee'].sum()
-        total_cm1 = total_gmv - total_ofd_fees
-        total_cm2 = total_cm1 - total_cogs
         
         total_gross_revenue = df_financial_base['gross_revenue_order'].sum()
         total_orders = df_order_count_base['order_id'].nunique()
@@ -443,18 +436,18 @@ if page == "Merchant Analysis":
         repeat_customers = order_counts[order_counts['order_count'] >= 2]['customer_id'].nunique()
         total_customers = order_counts['customer_id'].nunique()
         same_month_repeat_rate = (repeat_customers / total_customers * 100) if total_customers > 0 else 0.0
+        avg_rating = df_outlet_filtered['avg_rating'].mean().round(2)
+        
         
     if not df_orders_filtered_prev.empty:
         df_financial_base_prev = df_orders_filtered_prev[df_orders_filtered_prev['status'].isin(FINANCIAL_STATUSES)] if not selected_statuses else df_orders_filtered_prev
         df_order_count_base_prev = df_orders_filtered_prev[df_orders_filtered_prev['status'].isin(TOTAL_ORDER_COUNT_STATUSES)] if not selected_statuses else df_orders_filtered_prev
-        df_unique_withdrawals_prev = df_financial_base_prev[df_financial_base_prev['withdrawal_id'].notna()].drop_duplicates(subset=['withdrawal_id'])
         
         total_gmv_prev = df_financial_base_prev['gmv_order'].sum()
         total_gross_revenue_prev = df_financial_base_prev['gross_revenue_order'].sum()
         
-        total_ofd_fees_prev = df_unique_withdrawals_prev['ofd_fee'].sum()
-        total_cm1_prev = total_gmv_prev - total_ofd_fees_prev
-        total_cm2_prev = total_cm1_prev - total_gmv_prev
+        # total_cm1_prev = total_gmv_prev - total_ofd_fees_prev
+        # total_cm2_prev = total_cm1_prev - total_gmv_prev
         
         total_orders_prev = df_order_count_base_prev['order_id'].nunique()
         success_order_count_prev = df_financial_base_prev['order_id'].nunique()
@@ -475,8 +468,6 @@ if page == "Merchant Analysis":
     gmv_growth = ((total_gmv - total_gmv_prev) / total_gmv_prev * 100) if total_gmv_prev > 0 else 0
     gross_revenue_growth = ((total_gross_revenue - total_gross_revenue_prev) / total_gross_revenue_prev * 100) if total_gross_revenue_prev > 0 else 0
     orders_growth = ((total_orders - total_orders_prev) / total_orders_prev * 100) if total_orders_prev > 0 else 0
-    total_cm1_growth = ((total_cm1 - total_cm1_prev) / total_cm1_prev * 100) if total_cm1_prev > 0 else 0
-    total_cm2_growth = ((total_cm2 - total_cm2_prev) / total_cm2_prev * 100) if total_cm2_prev > 0 else 0
     aov_growth = ((avg_order_value - avg_order_value_prev) / avg_order_value_prev * 100) if avg_order_value_prev != 0 else 0
     success_order_count_growth = ((success_order_count - success_order_count_prev)/success_order_count_prev * 100) if success_order_count_prev > 0 else 0
     success_ratio_growth = ((success_ratio - success_ratio_prev) / success_ratio_prev * 100) if success_ratio_prev != 0 else 0
@@ -486,10 +477,10 @@ if page == "Merchant Analysis":
     # tab
     financial_tab, order_tab, lifecycle_tab, menu_tab, location_tab = st.tabs(["📈 Financial", "🛒 Order Details",  "🏪 Lifecycle & Status", "📊 Menu Performance", "🗺️ Location & Delivery"])
     
-    # growth_tab
+    # financial_tab
     with financial_tab:
         if not df_orders_filtered.empty:
-            st.subheader("Overview")
+            st.subheader("Financial")
             
             status_breakdown = df_order_count_base['status'].value_counts()
             completed_count = status_breakdown.get('wc-completed', 0)
@@ -512,9 +503,9 @@ Total Success Orders: {success_order_count:,}"""
             with kpi_cols[0]:
                 st.metric("Gross Merchandise Value (GMV)", f"Rp {total_gmv:,.0f}", delta=f"{gmv_growth:,.1f}% From last month", help="Total Gross Merchandise Value")
             with kpi_cols[1]:
-                st.metric("Contribution Margin 1 (CM1)", f"Rp {total_cm1:,.0f}", delta=f"{total_cm1_growth:,.1f}% From last month", help="Contribution Margin 1: GMV-OFD Fees")
+                st.metric("Total Gross Revenue", f"Rp {total_gross_revenue:,.0f}", delta=f"{gross_revenue_growth:,.1f}% From last month", help="GMV-COGS")
             with kpi_cols[2]:
-                st.metric("Contribution Margin 2 (CM2)", f"Rp {total_cm2:,.0f}", delta=f"{total_cm2_growth:,.1f}% From last month", help="Contribution Margin 2: CM1- COGS")
+                st.metric("Total Orders", f"{total_orders:,.0f}", delta=f"{orders_growth:,.1f}% From last month", help=help_text)
             with kpi_cols[3]:
                 st.metric("Average Order Value (AOV)", f"Rp {avg_order_value:,.0f}", delta=f"{aov_growth:.1f}% From last month", help="Nilai rata-rata transaksi per order.")
     
@@ -524,12 +515,10 @@ Total Success Orders: {success_order_count:,}"""
                 financial_selection = st.selectbox("View Trend By:", ("Monthly", "Weekly", "Daily"))
                 granularity_for_query = financial_selection.lower()
             with col1:
-                selected_metric_to_plot = st.segmented_control("Show Trend For:", options=["Gross Merchandise Value","Contribution Margin 1", "Contribution Margin 2", "Average Order Value"], 
+                selected_metric_to_plot = st.segmented_control("Show Trend For:", options=["Gross Merchandise Value","Gross Revenue", "Total Orders", "Average Order Value"], 
                                                                 default= "Gross Merchandise Value", key="financial_trend_control")
             # data trend for financial tab chart
             df_trend_source = df_financial_base.copy()
-            df_trend_source['cm1'] = df_trend_source['gmv_order'] - df_trend_source['ofd_fee'].fillna(0)
-            df_trend_source['cm2'] = df_trend_source['cm1'] - df_trend_source['cogs_order'].fillna(0)
             df_trend_source['aov'] = df_trend_source['gross_revenue_order'] / df_trend_source.groupby('order_date')['order_id'].transform('nunique')
 
             if granularity_for_query == 'daily':
@@ -541,19 +530,22 @@ Total Success Orders: {success_order_count:,}"""
 
             df_trend = df_trend_source.groupby('period_str').agg(
                 gmv=('gmv_order', 'sum'),
-                cm1=('cm1', 'sum'),
-                cm2=('cm2', 'sum'),
+                gross_revenue=('gross_revenue_order', 'sum'),
+                orders=('order_id', 'nunique'),
                 aov=('aov', 'mean')).reset_index()
             
             plot_mapping = {
                 "Gross Merchandise Value": ("gmv", "GMV Growth", total_gmv, gmv_growth),
-                "Contribution Margin 1": ("cm1", "CM1 Growth", total_cm1, total_cm1_growth),
-                "Contribution Margin 2": ("cm2", "CM2 Growth", total_cm2, total_cm2_growth),
+                "Gross Revenue": ("gross_revenue", "Gross Revenue Growth", total_gross_revenue, gross_revenue_growth),
+                "Total Orders": ("orders", "Total Orders", total_orders, orders_growth),
                 "Average Order Value": ("aov", "Average Order Value Growth", avg_order_value, aov_growth)}
 
             y_axis, title, display_value, growth_value = plot_mapping.get(
                 selected_metric_to_plot, 
                 ("gmv_order", "GMV Growth", total_gmv, gmv_growth))
+            
+            is_currency_metric = selected_metric_to_plot in ["Gross Merchandise Value", "Gross Revenue", "Average Order Value"]
+            currency_prefix = "Rp " if is_currency_metric else ""
 
             color = "green" if growth_value >= 0 else "red"
             arrow = "↑" if growth_value >= 0 else "↓"
@@ -561,7 +553,7 @@ Total Success Orders: {success_order_count:,}"""
             st.markdown(f"""
                 <div style="font-size:24px; font-weight:600;">Total {selected_metric_to_plot}</div>
                 <div style="display:flex; align-items:center; gap:16px;">
-                    <div style="font-size:32px; font-weight:700;">Rp {display_value:,.0f}</div>
+                    <div style="font-size:32px; font-weight:700;">{currency_prefix}{display_value:,.0f}</div>
                     <div style="font-size:16px; color:{color};">
                         {arrow} {growth_value:,.1f}% from last period
                     </div>
@@ -576,7 +568,7 @@ Total Success Orders: {success_order_count:,}"""
                     title=title,
                     labels={'period_str': financial_selection, y_axis: selected_metric_to_plot},
                     markers=True)
-                if any(keyword in selected_metric_to_plot for keyword in ["Gross Merchandise Value", "Contribution Margin 1",  "Contribution Margin 2", "Average Order Value"]):
+                if any(keyword in selected_metric_to_plot for keyword in ["Gross Merchandise Value", "Gross Revenue", "Average Order Value"]):
                     fig.update_yaxes(tickprefix="Rp ", tickformat=",.0f")
             else:
                 st.info("No trend data available for the selected filters.")
@@ -597,13 +589,13 @@ Total Success Orders: {success_order_count:,}"""
                 
         # order tab     
         with order_tab:
-            st.subheader("Overview")
+            st.subheader("Order Details")
             kpi_order_cols = st.columns(5)
             kpi_order_cols[0].metric("Total Order Success", f"{success_order_count}", delta=f"{success_order_count_growth:.1f}% From last month", help=f"{help_text}")
             kpi_order_cols[1].metric("Success Order Ratio", f"{success_ratio:.1f}%", delta=f"{success_ratio_growth:.1f}% From last month",help="Total order success (completed, disbursement completed, and disbursement progress) divide total orders.")
             kpi_order_cols[2].metric("Same-Month 2x Repeat",f"{same_month_repeat_rate:.1f}%", delta=f"{same_month_repeat_rate_growth:.1f}% From last month",help="Percentage of customers who made ≥2 orders in the same month.")
             kpi_order_cols[3].metric("Average Order Value", f"Rp {avg_order_value:,.0f}", delta=f"{aov_growth:.1f}% From last month", help="Nilai rata-rata transaksi per order.")
-            kpi_order_cols[4].metric("Average Rating", f"belum ada", delta=f"brp% From last month", help="Average customer rating.")
+            kpi_order_cols[4].metric("Average Rating", f"⭐ {avg_rating}", delta=f"brp% From last month", help="Average customer rating.")
             
             st.write("---")
             col1, col2 = st.columns([3, 1])
@@ -737,9 +729,12 @@ Total Success Orders: {success_order_count:,}"""
             df_trend_ratio = df_orders_filtered.copy()
             success_statuses = ['wc-completed', 'wc-disbursement-completed', 'wc-disbursement-progress']
             cancelled_status = 'wc-cancelled'
+            other_statuses = 'wc-processing'
             
             df_trend_ratio['status_group'] = df_trend_ratio['status'].apply(
-                lambda x: 'Success' if x in success_statuses else ('Cancelled' if x == cancelled_status else None))
+                lambda x: 'Success' if x in success_statuses 
+                else ('Cancelled' if x == cancelled_status 
+                else ('Processing' if x in other_statuses else None)))
             df_trend_ratio.dropna(subset=['status_group'], inplace=True)
             
             if order_granularity_selection2 == 'Daily':
@@ -763,13 +758,13 @@ Total Success Orders: {success_order_count:,}"""
                         color='status_group',
                         title='Success vs. Cancelled Orders Ratio',
                         labels={'order_count': 'Total Orders', 'period_str': 'Period', 'status_group':'Status'},
-                        color_discrete_map={'Success': '#87d499', 'Cancelled': '#fa7878'})
+                        color_discrete_map={'Success': '#87d499', 'Cancelled': '#fa7878', 'Processing':'#ede891'})
                     fig_bar.update_layout(barmode='stack', plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', margin=dict(t=60, l=80, r=160, b=25))
                     fig_bar.update_traces(textposition='inside', insidetextfont_color='white')
                     st.plotly_chart(fig_bar, use_container_width=True)
 
                 with col2:
-                    average_data = df_trend_data.groupby('status_group')['order_count'].mean().reset_index()
+                    average_data = df_trend_data.groupby('status_group')['order_count'].sum().reset_index()
 
                     fig_pie = px.pie(
                         average_data,
@@ -777,22 +772,96 @@ Total Success Orders: {success_order_count:,}"""
                         names='status_group',
                         title='Success vs. Cancelled Orders Ratio',
                         color= 'status_group',
-                        color_discrete_map={'Success': '#87d499', 'Cancelled': '#fa7878'},
-                        labels={'order_count': 'Jumlah Pesanan', 'status_group': 'Status'}
-                    )
+                        color_discrete_map={'Success': '#87d499', 'Cancelled': '#fa7878', 'Processing':'#ede891'},
+                        labels={'order_count': 'Jumlah Pesanan', 'status_group': 'Status'})
                     fig_pie.update_traces(textinfo='none', hovertemplate="<b>%{label}</b><br>" + 
                         "Total Orders: %{value:,.1f}<br>" + 
-                        "Percent: %{percent}%<extra></extra>")
+                        "Percent: %{percent}<extra></extra>")
                     fig_pie.update_layout(showlegend=True, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', margin=dict(t=60, l=20, r=140,  b=0))
                     st.plotly_chart(fig_pie, use_container_width=True)
 
+                # Order Time
+                df_orders_filtered['order_hour'] = df_orders_filtered['order_date'].dt.hour
+                def get_time_slot(hour):
+                    if 6 <= hour < 12:
+                        return 'Morning (06:00-11:59)'
+                    elif 12 <= hour < 18:
+                        return 'Afternoon (12:00-17:59)'
+                    else:
+                        return 'Night (18:00-05:59)'
+
+                df_orders_filtered['time_slot'] = df_orders_filtered['order_hour'].apply(get_time_slot)
+
+                st.write("---")
+                st.markdown(f"""
+                    <div style="font-size:24px; font-weight:600; margin-bottom:16px;">
+                        Order Volume by Time Slot
+                    </div>
+                """, unsafe_allow_html=True)
+
+
+                df_time_slot = df_orders_filtered.groupby('time_slot')['order_id'].nunique().reset_index(name='Total Orders')
+                
+                order_list = ['Morning (06:00-11:59)', 'Afternoon (12:00-17:59)', 'Night (18:00-05:59)']
+                df_time_slot['time_slot'] = pd.Categorical(df_time_slot['time_slot'], categories=order_list, ordered=True)
+                df_time_slot = df_time_slot.sort_values('time_slot')
+
+                if not df_time_slot.empty:
+                    col_bar_time, col_donut_time = st.columns([2, 1])
+
+                    with col_bar_time:
+                        fig_time = px.bar(
+                            df_time_slot,
+                            x='time_slot',
+                            y='Total Orders',
+                            labels={'time_slot': 'Slot Waktu', 'Total Orders': 'Total Pesanan'},
+                            color='time_slot',
+                            color_discrete_sequence=px.colors.qualitative.Pastel1, 
+                            text='Total Orders')
+                        fig_time.update_traces(texttemplate='%{text:,.0f}', textposition='outside')
+                        fig_time.update_layout(
+                            margin=dict(t=40, l=40, r=50, b=25), 
+                            plot_bgcolor='rgba(0,0,0,0)',
+                            paper_bgcolor='rgba(0,0,0,0)',
+                            xaxis_title=None,
+                            yaxis_title='Total Orders',
+                            showlegend=False)
+                        st.plotly_chart(fig_time, use_container_width=True)
+
+                    with col_donut_time:
+                        fig_donut_time = px.pie(
+                            df_time_slot,
+                            values='Total Orders',
+                            names='time_slot',
+                            color='time_slot',
+                            color_discrete_sequence=px.colors.qualitative.Pastel1, 
+                            hole=0.4, 
+                            labels={'Total Orders': 'Total Orders', 'time_slot': 'Slot Waktu'})
+                        
+                        fig_donut_time.update_traces(textinfo='none', 
+                                                    hovertemplate="<b>%{label}</b><br>" +
+                                                                "Total Pesanan: %{value:,.0f}<br>" +
+                                                                "Persentase: %{percent}<extra></extra>")
+                        
+                        fig_donut_time.update_layout(
+                            margin=dict(t=0, l=20, r=50, b=0), 
+                            plot_bgcolor='rgba(0,0,0,0)',
+                            paper_bgcolor='rgba(0,0,0,0)',
+                            title=None,
+                            showlegend=False) 
+                            
+                        st.plotly_chart(fig_donut_time, use_container_width=True)
+
+                else:
+                    st.info("Tidak ada data untuk menganalisis slot waktu pesanan.")
+
             else:
                 st.info("Tidak ada data pesanan yang tersedia untuk rentang waktu ini.")
-        
+                
 
         # lifecycle tab
         with lifecycle_tab:
-            st.subheader("Overview")
+            st.subheader("Lifecyce & Status")
             outlet_performance_data = get_outlet_performance_metrics(start_date_filter, end_date_filter)
             outlet_performance_data_prev = get_outlet_performance_metrics(start_date_prev, end_date_prev)
             
@@ -1131,7 +1200,7 @@ Total Success Orders: {success_order_count:,}"""
             zombie_ratio_growth = calculate_growth(zombie_ratio, zombie_ratio_prev)
             zombie_ratio_display = f"{zombie_ratio:.1f}%" if zombie_ratio > 0 else "0.00%"
 
-            st.subheader("Overview")
+            st.subheader("Menu Performance")
             
             menu_cols = st.columns(2)
             menu_cols[0].metric("Product Availability Rate", menu_ratio_display, 

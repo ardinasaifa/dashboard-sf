@@ -9,8 +9,7 @@ load_dotenv()
 @contextmanager
 def get_connection():
     """
-    Koneksi utama ke database DATAMART.
-    Membaca konfigurasi dari file .env.
+    connection to datamart
     """
     conn = None
     try:
@@ -34,8 +33,7 @@ def get_connection():
 @contextmanager
 def get_dwh_connection():
     """
-    Koneksi khusus ke database Data Warehouse (dwh-1).
-    Digunakan untuk fungsi-fungsi yang butuh akses ke data mentah.
+    connection to data warehouse
     """
     conn = None
     try:
