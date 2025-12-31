@@ -1,4 +1,3 @@
-# DASHBOARD & UI 
 streamlit
 streamlit-option-menu
 pandas
@@ -6,17 +5,10 @@ plotly
 folium
 streamlit-folium
 
-# GEOSPATIAL
-shapely<2.0
+shapely>=2.0
 
-# DATABASE
 python-dotenv
 psycopg2-binary
-
-# DATETIME
 python-dateutil
 
-# FORECASTING
-prophet==1.1.5
-cmdstanpy==1.2.2
-numpy<2.0
+prophet==1.2.1
