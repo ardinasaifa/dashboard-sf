@@ -6,15 +6,17 @@ plotly
 folium
 streamlit-folium
 
-# GEOSPATIAL & GEOMETRY 
-shapely
+# GEOSPATIAL
+shapely<2.0
 
-# DATABASE & ENVIRONMENT
+# DATABASE
 python-dotenv
 psycopg2-binary
 
-# UTILITIES & DATETIME 
+# DATETIME
 python-dateutil
 
-# FORECASTING 
-prophetgit
+# FORECASTING
+prophet==1.1.5
+cmdstanpy==1.2.2
+numpy<2.0

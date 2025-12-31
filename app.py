@@ -21,7 +21,7 @@ df_outlet = load_dm_outlet()
 df_brands = load_dm_brands()
 
 # FILE_PROVINSI = '38 Provinsi Indonesia - Provinsi.json'
-BASE_DIR = "D:\Ardina\SuperFood\dashboard-metric\indonesia-district-master" 
+BASE_DIR = "indonesia-district-master" 
 
 # CSS Configuration
 st.set_page_config(layout="wide", page_title="Superfood Dashboard", initial_sidebar_state="expanded")
@@ -310,7 +310,7 @@ def calculate_growth(current, prev):
 
 # ================================================================= SIDEBAR NAVIGASI =================================================================
 with st.sidebar:
-    st.image("D:\Ardina\SuperFood\dashboard-metric (final project version)\FINISH - SUPERFOOD-05.png", width=200)
+    st.image("FINISH - SUPERFOOD-05.png", width=200)
 
     selected_tab = option_menu(
         menu_title=None,
