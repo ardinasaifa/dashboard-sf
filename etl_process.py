@@ -3,7 +3,6 @@ import pandas as pd
 import streamlit as st
 from db_connection import get_connection, get_dwh_connection
 from datetime import datetime, timedelta
-from dateutil.relativedelta import relativedelta
 import calendar
 
 
@@ -51,6 +50,24 @@ def load_dm_outlet():
     except Exception as e:
         st.error(f"Gagal total memuat data dari DATAMART: {e}")
         return pd.DataFrame()
+    
+@st.cache_data(ttl=3600)
+def load_dm_brands():
+    print("--- [ETL] Membaca dari DATAMART: public.dm_brands ---")
+    try:
+        with get_connection() as conn:
+            df_brands = pd.read_sql("SELECT * FROM public.dm_brands;", conn)
+            
+            if df_brands.empty:
+                st.error("Tabel Datamart (dm_brands) kosong. Jalankan workflow n8n terlebih dahulu.")
+                return pd.DataFrame()
+
+            print(f"Berhasil mengambil {len(df_brands)} baris dari dm_brands.")
+            return df_brands
+    except Exception as e:
+        st.error(f"Gagal total memuat data dari DATAMART: {e}")
+        return pd.DataFrame()
+ 
 
 @st.cache_data
 def get_outlet_performance_metrics(start_date, end_date):
