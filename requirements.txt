@@ -1,5 +1,6 @@
 # DASHBOARD & UI 
 streamlit
+streamlit-option-menu
 pandas
 plotly
 folium
@@ -16,4 +17,4 @@ psycopg2-binary
 python-dateutil
 
 # FORECASTING 
-prophet
+prophetgit
